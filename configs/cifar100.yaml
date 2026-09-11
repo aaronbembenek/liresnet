@@ -4,6 +4,8 @@ model:
     use_lln: True
     num_lc_iter: 10
     act_name: 'MinMax'
+    out_dim: 2048
+    mlp_depth: 8
 
 training:
     batch_size: 256
@@ -15,6 +17,7 @@ training:
     grad_clip_val: 3
     nadam: True
     lookahead: True
+    use_ddpm: True
 
 dataset:
     name: 'cifar100'

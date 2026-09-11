@@ -85,12 +85,12 @@ class HouseHolder_Order_2(nn.Module):
         assert (channels % 2) == 0
         self.num_groups = channels // 2
 
-        self.theta0 = nn.Parameter(
-            (np.pi * torch.rand(self.num_groups)).cuda(), requires_grad=True)
-        self.theta1 = nn.Parameter(
-            (np.pi * torch.rand(self.num_groups)).cuda(), requires_grad=True)
-        self.theta2 = nn.Parameter(
-            (np.pi * torch.rand(self.num_groups)).cuda(), requires_grad=True)
+        self.theta0 = nn.Parameter(np.pi * torch.rand(self.num_groups),
+                                   requires_grad=True)
+        self.theta1 = nn.Parameter(np.pi * torch.rand(self.num_groups),
+                                   requires_grad=True)
+        self.theta2 = nn.Parameter(np.pi * torch.rand(self.num_groups),
+                                   requires_grad=True)
 
     def forward(self, z, axis=1):
         theta0 = torch.clamp(self.theta0.view(1, -1, 1, 1), 0., 2 * np.pi)

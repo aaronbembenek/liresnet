@@ -22,11 +22,19 @@ def get_args():
     parser.add_argument('--ckpt_prefix', default='', type=str)
     parser.add_argument('--max_save', default=2, type=int)
     parser.add_argument('--resume_from', default='', type=str)
+    # data
+    parser.add_argument('--data_root', default='./data/', type=str)
+    parser.add_argument('--num_workers', default=4, type=int)
+    # device
+    parser.add_argument('--device',
+                        default='auto',
+                        type=str,
+                        help='`auto`, `cuda`, `mps` or `cpu`')
     # distributed training
     parser.add_argument('--launcher',
-                        default='slurm',
+                        default='none',
                         type=str,
-                        help='should be either `slurm` or `pytorch`')
+                        help='should be `none`, `slurm` or `pytorch`')
     parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
 
     return parser.parse_args()
@@ -61,36 +69,47 @@ def main():
         training_logs = []
         resume = False
 
-    rank, local_rank, num_gpus = tools.init_DDP(args.launcher)
-    print('Inited distributed training!')
+    device = tools.get_device(args.device)
+    rank, local_rank, world_size = tools.init_DDP(args.launcher, device)
 
     if local_rank == 0:
         os.system(f'cat {args.config}')
 
     print(f'Use checkpoint prefix: {args.ckpt_prefix}')
 
+    loader_kwargs = dict(num_classes=dataset_cfg['num_classes'],
+                         data_root=args.data_root,
+                         num_workers=args.num_workers,
+                         pin_memory=device.type == 'cuda',
+                         seed=dataset_cfg.get('seed', 2023))  # default 2023
+
     train_loader, train_sampler, val_loader, _ = tools.data_loader(
         data_name=dataset_cfg['name'],
-        batch_size=train_cfg['batch_size'] // num_gpus,
-        num_classes=dataset_cfg['num_classes'],
-        seed=dataset_cfg.get('seed', 2023))  # if seed is not given, use 2023
+        batch_size=train_cfg['batch_size'] // world_size,
+        **loader_kwargs)
 
-    aug_loader, aug_sampler, _, _ = tools.data_loader(
-        data_name='ddpm',
-        batch_size=train_cfg['batch_size'] // num_gpus * 3,
-        num_classes=dataset_cfg['num_classes'],
-        seed=dataset_cfg.get('seed', 2023))
-    aug_iter = iter(aug_loader)
+    # Training on diffusion-generated images alongside the real ones is part
+    # of the published recipe, but the .npz has to be supplied by the user.
+    # See `tools/dataset/make_ddpm_npz.py`.
+    use_ddpm = train_cfg.get('use_ddpm', True)
+    aug_loader = aug_sampler = aug_iter = None
+    if use_ddpm:
+        aug_loader, aug_sampler, _, _ = tools.data_loader(
+            data_name='ddpm',
+            batch_size=train_cfg['batch_size'] // world_size * 3,
+            **loader_kwargs)
+        aug_iter = iter(aug_loader)
 
     model = models.GloroNet(**model_cfg, **dataset_cfg)
     if resume:
         model.load_state_dict(backbone_ckpt)
     print(model)
-    model = model.cuda()
+    model = model.to(device)
 
-    model = torch.nn.parallel.DistributedDataParallel(model,
-                                                      device_ids=[local_rank],
-                                                      output_device=local_rank)
+    if world_size > 1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank], output_device=local_rank)
+    net = model.module if hasattr(model, 'module') else model
 
     if cfg['training']['nadam']:
         optim_fn = torch.optim.NAdam
@@ -110,7 +129,7 @@ def main():
         optimizer.load_state_dict(optimizer_ckpt)
         scheduler.current_iter = current_iter
         scheduler.base_lr = optimizer_ckpt['param_groups'][0]['initial_lr']
-        sub_lipschitz = model.module.sub_lipschitz().item()
+        sub_lipschitz = net.sub_lipschitz().item()
 
     def eps_fn(epoch):
         ratio = min(epoch / train_cfg['epochs'] * 2, 1)
@@ -128,29 +147,31 @@ def main():
     t = time.time()
     for epoch in range(start_epoch, train_cfg['epochs']):
         eps = eps_fn(epoch)
-        train_sampler.set_epoch(epoch)
-        # aug_sampler.set_epoch(epoch)
-        model.module.set_num_lc_iter(model_cfg['num_lc_iter'])
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        net.set_num_lc_iter(model_cfg['num_lc_iter'])
 
         model.train()
         correct_vra = correct = total = 0.
         for idx, (inputs, targets) in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
             bs = inputs.shape[0]
-            sub_lipschitz = model.module.sub_lipschitz()
+            sub_lipschitz = net.sub_lipschitz()
 
-            try:
-                input2, target2 = next(aug_iter)
-            except StopIteration:
-                aug_sampler.set_epoch(epoch)
-                aug_iter = iter(aug_loader)
-                input2, target2 = next(aug_iter)
+            if use_ddpm:
+                try:
+                    input2, target2 = next(aug_iter)
+                except StopIteration:
+                    if aug_sampler is not None:
+                        aug_sampler.set_epoch(epoch)
+                    aug_iter = iter(aug_loader)
+                    input2, target2 = next(aug_iter)
 
-            inputs = torch.cat([inputs, input2])
-            targets = torch.cat([targets, target2])
+                inputs = torch.cat([inputs, input2])
+                targets = torch.cat([targets, target2])
 
-            inputs = inputs.cuda(non_blocking=True)
-            targets = targets.cuda(non_blocking=True)
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
             y, y_, loss = train_fn(model,
                                    x=inputs,
                                    label=targets,
@@ -175,17 +196,17 @@ def main():
 
         if epoch % 5 == 0 or epoch > train_cfg['epochs'] * 0.9:
             model.eval()
-            model.module.set_num_lc_iter(500)  # let the power method converge
+            net.set_num_lc_iter(500)  # let the power method converge
             # only need to comput the sub_lipschitz only once for validation
             sub_lipschitz = 1.0
             if gloro_cfg['eps'] != 0:
-                sub_lipschitz = model.module.sub_lipschitz().item()
+                sub_lipschitz = net.sub_lipschitz().item()
 
             val_correct_vra = val_correct = val_total = 0.
 
             for inputs, targets in val_loader:
-                inputs = inputs.cuda(non_blocking=True)
-                targets = targets.cuda(non_blocking=True)
+                inputs = inputs.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
                 with torch.no_grad():
                     y, y_, _ = models.trades_loss(model,
                                                   x=inputs,
@@ -205,7 +226,8 @@ def main():
             collect_info = torch.tensor(collect_info,
                                         dtype=torch.float32,
                                         device=inputs.device).clamp_min(1e-9)
-            torch.distributed.all_reduce(collect_info)
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(collect_info)
 
             acc_train = 100. * collect_info[1] / collect_info[2]
             acc_val = 100. * collect_info[4] / collect_info[5]
@@ -227,7 +249,7 @@ def main():
         print(string)
         training_logs.append(string)
         if rank == 0:
-            state = dict(backbone=model.module.state_dict(),
+            state = dict(backbone=net.state_dict(),
                          optimizer=optimizer.state_dict(),
                          start_epoch=epoch + 1,
                          current_iter=scheduler.current_iter,
@@ -247,6 +269,7 @@ def main():
 
 
 if __name__ == '__main__':
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
     main()

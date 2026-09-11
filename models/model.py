@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from .blocks import LiResConv, LiResMLP
 from .layers import Conv2d, Sequential, build_activation
+from .linalg_utils import spectral_norm
 
 
 def build_stem(input_size: int, width: int, act_name: str) -> nn.Module:
@@ -43,6 +44,15 @@ class Map2Vec(nn.Module):
         assert feat_size % 4 == 0
         mid_size = feat_size // 4
         mid_dim = feat_dim * mid_size**2
+
+        # `get_weight` Choleskys `weight @ weight.T`, which is only full rank
+        # when the weight has at least as many columns as rows.
+        if out_dim > mid_dim:
+            raise ValueError(
+                f'out_dim ({out_dim}) must be <= mid_dim ({mid_dim}), where '
+                f'mid_dim = width * (feature_size // 4)**2 = '
+                f'{feat_dim} * {mid_size}**2. Either lower out_dim or raise '
+                'the model width.')
 
         kernel = torch.randn(feat_dim, feat_dim * 16)
         kernel = kernel / feat_dim**.5 / 4
@@ -88,8 +98,8 @@ class Map2Vec(nn.Module):
 
         kernel, weight = self.get_weight()
         kernel = kernel.reshape(self.feat_dim, -1)
-        lc = kernel.svd().S.max()
-        lc = lc * weight.svd().S.max()
+        lc = spectral_norm(kernel)
+        lc = lc * spectral_norm(weight)
         return lc.item()
 
 
@@ -163,8 +173,14 @@ class GloroNet(nn.Module):
                  num_lc_iter: int = 10,
                  act_name: str = 'MinMax',
                  use_lln: bool = True,
+                 out_dim: int = 2048,
+                 mlp_depth: int = 8,
                  **kwargs):
         super(GloroNet, self).__init__()
+
+        # MinMax splits the feature dim in half; an odd size mis-splits.
+        if out_dim % 2 != 0:
+            raise ValueError(f'out_dim ({out_dim}) must be even.')
 
         stem, feature_size = build_stem(input_size, width, act_name)
         self.stem = stem
@@ -178,14 +194,12 @@ class GloroNet(nn.Module):
 
         self.depth = depth
 
-        out_dim = 2048
-
         self.neck = Map2Vec(feat_dim=width,
                             feat_size=feature_size,
                             out_dim=out_dim,
                             activation=activation)
         self.linear = LiResMLP(num_features=out_dim,
-                               depth=8,
+                               depth=mlp_depth,
                                activation=activation)
 
         self.head = head(out_dim, num_classes, use_lln)

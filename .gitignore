@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# datasets and training outputs
+data/
+checkpoint/
+*.pth
+*.npz

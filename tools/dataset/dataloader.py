@@ -1,4 +1,7 @@
+from typing import Optional
+
 import torch.utils.data as Data
+from torch import distributed as torch_dist
 
 from .cifar import cifar_dataset
 from .imagenet_dataset import imagenet_dataset
@@ -8,10 +11,15 @@ from .tinyimgnet import DDPM_dataset, tinyimagenet_dataset
 def data_loader(data_name: str = 'cifar',
                 num_classes: int = 10,
                 batch_size: int = 128,
-                distributed: bool = True,
+                distributed: Optional[bool] = None,
                 data_root: str = './data/',
                 seed: int = 2023,
+                num_workers: int = 4,
+                pin_memory: bool = False,
                 **kargs):
+
+    if distributed is None:
+        distributed = torch_dist.is_available() and torch_dist.is_initialized()
 
     if 'cifar' in data_name and num_classes in [10, 100]:
         trainset, testset = cifar_dataset(num_classes, data_root=data_root)
@@ -41,19 +49,19 @@ def data_loader(data_name: str = 'cifar',
     train_loader = Data.DataLoader(trainset,
                                    batch_size=batch_size,
                                    sampler=train_sampler,
-                                   num_workers=8,
+                                   num_workers=num_workers,
                                    shuffle=(train_sampler is None),
                                    drop_last=True,
-                                   pin_memory=True,
-                                   persistent_workers=True)
+                                   pin_memory=pin_memory,
+                                   persistent_workers=num_workers > 0)
 
     test_loader = None
     if testset is not None:
         test_loader = Data.DataLoader(testset,
                                       batch_size=batch_size * 2,
                                       sampler=test_sampler,
-                                      num_workers=8,
+                                      num_workers=num_workers,
                                       shuffle=False,
                                       drop_last=False,
-                                      pin_memory=True)
+                                      pin_memory=pin_memory)
     return train_loader, train_sampler, test_loader, test_sampler

@@ -1,0 +1,26 @@
+[project]
+name = "liresnet"
+version = "0.1.0"
+description = "LiResNet: a network architecture for training certifiably robust models"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy",
+    "pillow",
+    "pyyaml",
+    "timm",
+    "torch",
+    "torchvision",
+]
+
+[dependency-groups]
+dev = [
+    "flake8",
+    "isort",
+    "pre-commit",
+    "yapf",
+]
+
+# `models/` and `tools/` live at the repo root with no build backend, so this is
+# a virtual project: uv manages .venv but does not try to build the root.
+[tool.uv]
+package = false

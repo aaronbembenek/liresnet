@@ -11,9 +11,91 @@ This repository provides the implementation of our cutting-edge research on cert
 - For training a model, check out our `run.sh` as a starting point.
 - Dive into our [configs](/configs) for additional dataset configurations.
 
-## 🔜 Upcoming Updates:
-- A comprehensive README.
-- Pre-trained model checkpoints.
+## 🛠️ Setup
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync          # creates .venv and installs everything
+```
+
+Run anything in the project with `uv run` from the repository root:
+
+```bash
+uv run python train.py --config configs/cifar10.yaml
+```
+
+### Choosing a device
+
+`train.py` takes `--device auto|cuda|mps|cpu` (default `auto`, which prefers
+CUDA, then Apple Silicon's MPS, then CPU). Single-process training needs no
+launcher; `--launcher` defaults to `none`. Multi-GPU training is unchanged --
+see `run.sh`, which passes `--launcher=pytorch` to `torchrun`.
+
+```bash
+# Apple Silicon GPU
+uv run python train.py --config configs/cifar10_small.yaml --device mps --num_workers 2
+
+# CPU
+uv run python train.py --config configs/cifar10_small.yaml --device cpu
+```
+
+No `PYTORCH_ENABLE_MPS_FALLBACK` is required: every linear-algebra op this
+model uses has a native MPS kernel. On the evaluation path PyTorch's own MPS
+SVD kernel may print a `matrix too large to stage in MPS threadgroup memory`
+warning and fall back to the CPU internally; this is harmless and costs only a
+little evaluation speed.
+
+On this hardware `--num_workers 2` is faster than the default of 4 -- the
+augmentation pipeline contends with training for cores.
+
+### A quick config
+
+[`configs/cifar10_small.yaml`](configs/cifar10_small.yaml) trains a much
+smaller model (0.8M parameters) for 30 epochs. It is meant for experimenting
+with the certification machinery, **not** for reproducing the table below.
+
+Measured on an M-series Mac with `--device mps --num_workers 2`:
+
+| | wall time | clean accuracy | VRA@36/255 |
+|:--|:--:|:--:|:--:|
+| `cifar10_small.yaml`, 30 epochs | 9.9 min | 58.6% | 50.8% |
+
+The same config on `--device cpu` is roughly six times slower per epoch
+(~2.7 min/epoch), so budget a bit over an hour for the full 30.
+
+The model size is configurable under `model:`. Besides the conv trunk's
+`depth` and `width`, `out_dim` and `mlp_depth` size the MLP head -- which
+dominates both parameter count and training cost, since every forward pass
+orthogonalizes a weight stack of shape `(mlp_depth, out_dim, out_dim)`. Two
+constraints are enforced: `out_dim` must be even, and `out_dim` must not
+exceed `width * (feature_size // 4) ** 2`.
+
+### Diffusion-generated training data (`use_ddpm`)
+
+The published recipe trains on the real dataset *plus* a large set of
+diffusion-generated images, which is where the numbers in the table come from.
+Each config has a `use_ddpm` flag under `training:`; when it is on, training
+loads `data/c{num_classes}_ddpm.npz`.
+
+**That file is not distributed with this repository and there is no code here
+that downloads it.** With `use_ddpm: True` and no such file, training stops at
+startup with a `FileNotFoundError`. Set `use_ddpm: False` to train on the real
+data alone (as `configs/cifar10_small.yaml` does), which trains fine but will
+not reproduce the published accuracy.
+
+To use the real recipe, obtain a generated-image set from the robustness
+literature these papers build on -- the DDPM data of [Rebuffi et
+al. (2021)](https://arxiv.org/abs/2103.01946) or the EDM data of [Wang et
+al. (2023)](https://arxiv.org/abs/2302.04638) -- then convert whatever layout
+it ships in:
+
+```bash
+uv run python tools/dataset/make_ddpm_npz.py <downloaded.npz> --num_classes 10
+```
+
+The converter normalizes the arrays to the `uint8` NHWC images and `image` /
+`label` keys that the loader expects, and validates shapes and label ranges.
 
 ## 📈 Main Results:
 | dataset       | clean accuracy | VRA@36/255 | VRA@72/255 | VRA@108/255 |

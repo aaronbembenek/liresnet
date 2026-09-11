@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 
 from .cholesky_grad import CholeskyOrth
+from .linalg_utils import spectral_norm
 
 
 class LiResConv(nn.Module):
@@ -155,7 +156,7 @@ class LiResMLP(nn.Module):
             return 1.0
 
         weights = self.get_weight()
-        return torch.linalg.matrix_norm(weights, ord=2).prod()
+        return spectral_norm(weights).prod()
 
     def train(self, mode):
         self.training = mode
