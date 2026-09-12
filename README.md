@@ -71,6 +71,97 @@ orthogonalizes a weight stack of shape `(mlp_depth, out_dim, out_dim)`. Two
 constraints are enforced: `out_dim` must be even, and `out_dim` must not
 exceed `width * (feature_size // 4) ** 2`.
 
+### Experimenting with the Lipschitz bound
+
+The certificate rests on an *upper* bound on the network's Lipschitz constant,
+computed by `GloroNet.sub_lipschitz()`. Experimenting with how that bound is
+computed needs no training: the bound is a pure function of the weights, and
+accuracy and VRA need only a forward pass over a trained checkpoint.
+
+A trained checkpoint for `configs/cifar10_small.yaml` ships in
+[`pretrained/`](pretrained), so you can start immediately:
+
+```bash
+# the bound alone -- no dataset touched, ~2s on CPU including startup
+uv run python eval.py --checkpoint pretrained/cifar10_small.pth \
+    --device cpu --skip_data
+
+# accuracy and VRA on the full test set
+uv run python eval.py --checkpoint pretrained/cifar10_small.pth --device cpu
+```
+
+which reports a per-component breakdown of the bound alongside the results:
+
+```
+Lipschitz bound (500 power iterations, 0.96s):
+  stem=2.3007  conv=1.2003  neck=0.9998  linear=0.9997
+  sub_lipschitz (product) = 2.7608
+
+Evaluated 10000 test images in 22.27s:
+  clean accuracy = 59.98%
+  VRA @ 0.1412 (36/255) = 50.97%
+  VRA @ 0.2824 (72/255) = 42.94%
+  VRA @ 0.4235 (108/255) = 34.88%
+```
+
+Use `--num_test 1000` for a fast subset (about a second on CPU), and
+`--eps` to pick the radii.
+
+The `lipschitz()` implementations you would edit are
+[`Conv2d`](models/layers/conv.py) (stem, power iteration),
+[`LiResConv`](models/blocks.py) (conv trunk, power iteration),
+[`LiResMLP`](models/blocks.py) (spectral norm), and
+[`Map2Vec`](models/model.py) (neck). `spectral_norm()` in
+[models/linalg_utils.py](models/linalg_utils.py) sits in that path.
+
+Changing how the bound is computed does not invalidate the shipped
+checkpoint: the weights do not depend on it, so a new bound can be evaluated
+against a trained model without retraining. Two things are checked for you:
+
+- If your model needs state the checkpoint does not have, loading is
+  **refused** rather than leaving tensors randomly initialized -- that would
+  invalidate every number downstream while still looking plausible. If you
+  added scratch state for a new Lipschitz computation, such as a cached
+  power-iteration vector, register it with
+  `register_buffer(..., persistent=False)` so it is rebuilt on each run
+  instead of being expected in the checkpoint.
+- If you restructure `sub_lipschitz()` so it is no longer the product of the
+  four components, `eval.py` says so rather than presenting a breakdown that
+  does not add up.
+
+**A smaller bound always looks like an improvement.** VRA is computed from
+whatever `sub_lipschitz()` returns, and a smaller bound certifies a larger
+radius -- so *any* change that shrinks the bound raises VRA, whether or not
+the bound is still valid. Halving it on the shipped checkpoint lifts
+VRA@36/255 from 50.9% to 55.4% while clean accuracy does not move at all,
+because the network itself is unchanged. **Rising VRA is therefore not
+evidence that a change is correct; it is equally the signature of an unsound
+bound.** Check soundness separately, with the lower-bound search below.
+
+**Checking that a bound is sound and tight.** The power method converges to
+the spectral norm *from below*, so too few iterations silently produces an
+*under*estimate -- an optimistic bound that the certificate does not actually
+support. `--lc_sweep` makes that visible:
+
+```bash
+uv run python eval.py --checkpoint pretrained/cifar10_small.pth \
+    --device cpu --lc_sweep 1,5,10,50,100,500
+```
+
+To check the bound from the other side, `tools/check_lipschitz_lower_bound.py`
+searches for input pairs maximizing `||f(x) - f(x')|| / ||x - x'||`, giving an
+empirical *lower* bound. A sound upper bound must exceed it, and the gap is
+how loose the bound is:
+
+```bash
+uv run python tools/check_lipschitz_lower_bound.py \
+    --checkpoint pretrained/cifar10_small.pth --device cpu
+```
+
+For the shipped checkpoint this reaches a lower bound of 2.52 against the
+computed upper bound of 2.76 -- within about 9%. The search is sensitive to
+`--lr`; too small a value leaves it still climbing and understates the bound.
+
 ### Diffusion-generated training data (`use_ddpm`)
 
 The published recipe trains on the real dataset *plus* a large set of

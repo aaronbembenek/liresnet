@@ -7,3 +7,6 @@ data/
 checkpoint/
 *.pth
 *.npz
+
+# ... except the checkpoints we ship for the evaluation tooling
+!pretrained/*.pth
