@@ -162,6 +162,34 @@ For the shipped checkpoint this reaches a lower bound of 2.52 against the
 computed upper bound of 2.76 -- within about 9%. The search is sensitive to
 `--lr`; too small a value leaves it still climbing and understates the bound.
 
+### Results for cifar10_small_stride1
+
+The `cifar10_small` configuration, with all convolutional strides set to 1.
+
+Ran this command:
+
+```
+uv run python eval.py --checkpoint pretrained/cifar10_small_stride1.pth --device mps --num_workers 2
+```
+
+and got this:
+
+```
+Checkpoint : pretrained/cifar10_small_stride1.pth
+Device     : mps
+Trained    : Epoch 29: Train acc 58.26%, 39.74%; val acc 62.75%, 53.51%. sub_lipschitz: 3.78. Time: 1.19 mins.
+
+Lipschitz bound (500 power iterations, 0.71s):
+  stem=4.0648  conv=0.9313  neck=0.9998  linear=0.9998
+  sub_lipschitz() = 3.7858
+
+Evaluated 10000 test images in 15.22s:
+  clean accuracy = 62.75%
+  VRA @ 0.1412 (36/255) = 53.50%
+  VRA @ 0.2824 (72/255) = 44.65%
+  VRA @ 0.4235 (108/255) = 35.98%
+```
+
 ### Diffusion-generated training data (`use_ddpm`)
 
 The published recipe trains on the real dataset *plus* a large set of
